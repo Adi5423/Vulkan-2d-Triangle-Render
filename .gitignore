@@ -1,0 +1,26 @@
+# Build directories
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.sln
+*.vcxproj*
+*.user
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.log
+
+# Compiled shader binaries
+shaders/*.spv
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Misc
+*.swp
+*.bak
+*.tmp 

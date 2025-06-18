@@ -1,0 +1,1237 @@
+Alright, buckle up—here’s the **full deep‐dive** into what we actually did step by step, why each piece was necessary, and exactly where the head-scratching problems came from. I’ll break it into two main parts:
+
+1. **The original Qt/QVulkanWindow approach** (and all its pitfalls)
+2. **The GLFW + pure Vulkan solution**, how it works, and how we finally got that triangle on-screen
+
+---
+
+## 1) The Qt + QVulkanWindow “Boss Fight”
+
+### 1.1) What we wanted to do
+
+* **Goal**: Copy-paste a “Vulkan triangle” into a minimal Qt application so you could press Build ↠ Run and immediately see three colored vertices forming a triangle.
+* **Why Qt**: You already had Qt 6.9.0 installed (in `D:\QT\Installation\1st\6.9.0\mingw_64`), and Qt has a convenient wrapper called **`QVulkanWindow`** that handles the “create swapchain → create framebuffers → begin render pass → present” boilerplate for you. In theory, you write a small subclass of `QVulkanWindowRenderer`, and Qt does the rest.
+
+### 1.2) The initial code sketch
+
+* **`.pro` file**: We wrote a Qt `.pro` that said:
+
+  ```pro
+  QT += core gui widgets vulkan  
+  CONFIG += c++17  
+  TEMPLATE = app  
+  SOURCES += main.cpp VulkanRenderer.cpp  
+  HEADERS += VulkanRenderer.h  
+  INCLUDEPATH += $$getenv(VULKAN_SDK)/Include  
+  LIBS += -L$$getenv(VULKAN_SDK)/Lib -lvulkan-1  
+  DEPLOYMENTFOLDERS += $$PWD/shaders  
+  ```
+
+  The idea:
+
+  * `QT += vulkan` tells Qt “please enable the QVulkanWindow module”
+  * `getenv(VULKAN_SDK)` pulls in your environment variable pointing at `D:\Vulkan\SDK\Installation`
+  * We also deploy everything under `shaders/` so that the compiled SPIR-V files get copied next to the EXE.
+
+* **`main.cpp`**: Roughly:
+
+  ```cpp
+  #include <QApplication>
+  #include <QVulkanInstance>
+  #include <QVulkanWindow>
+  #include "VulkanRenderer.h"
+
+  class VulkanWindow : public QVulkanWindow {
+  protected:
+      QVulkanWindowRenderer* createRenderer() override {
+          return new VulkanRenderer;
+      }
+  };
+
+  int main(int argc, char **argv) {
+      QApplication app(argc, argv);
+      QVulkanInstance inst;
+      if (!inst.create()) qFatal("inst failed");
+
+      VulkanWindow *window = new VulkanWindow;
+      window->setVulkanInstance(&inst);
+
+      QWidget container;
+      container.setWindowTitle("Triangle");
+      container.setMinimumSize(800, 600);
+      QVBoxLayout *l = new QVBoxLayout(&container);
+      l->setContentsMargins(0,0,0,0);
+      l->addWidget(QWidget::createWindowContainer(window));
+      container.show();
+      return app.exec();
+  }
+  ```
+
+  * We subclassed `QVulkanWindow` for our `createRenderer()` callback.
+  * Qt does the rest: create VkInstance, VkDevice, VkSurfaceKHR, VkSwapchainKHR, VkRenderPass, framebuffers, command buffers, etc. You only implement a few virtuals.
+
+* **`VulkanRenderer.h/.cpp`**:
+
+  * `initResources()` → load SPIR-V, create shader modules, create pipeline layout, create graphics pipeline, create a small host-visible vertex buffer with our three vertices.
+  * `startNextFrame()` → `vkCmdBindPipeline(...)`, `vkCmdBindVertexBuffers(...)`, `vkCmdDraw(3,1,0,0)`, then tell Qt “frame is ready” by calling `frameReady()` and `requestUpdate()`.
+  * `releaseResources()` → clean up the pipeline, pipeline layout, shader modules, vertex buffer, device memory.
+
+* **`shaders/triangle.vert` & `triangle.frag`**:
+
+  ```glsl
+  // triangle.vert
+  #version 450
+  layout(location = 0) in vec2 inPos;
+  layout(location = 1) in vec3 inColor;
+  layout(location = 0) out vec3 fragColor;
+  void main() {
+      gl_Position = vec4(inPos, 0.0, 1.0);
+      fragColor = inColor;
+  }
+  ```
+
+  ```glsl
+  // triangle.frag
+  #version 450
+  layout(location = 0) in vec3 fragColor;
+  layout(location = 0) out vec4 outColor;
+  void main() {
+      outColor = vec4(fragColor, 1.0);
+  }
+  ```
+
+  Then we ran:
+
+  ```bat
+  "%VULKAN_SDK%\Bin\glslangValidator.exe" -V triangle.vert -o triangle.vert.spv
+  "%VULKAN_SDK%\Bin\glslangValidator.exe" -V triangle.frag -o triangle.frag.spv
+  ```
+
+  which produced `triangle.vert.spv` and `triangle.frag.spv` in `shaders/`.
+
+### 1.3) The cascade of errors
+
+1. **`Unknown module(s) in QT: vulkan`**
+
+   * **Why**: Your Qt install wasn’t actually built with the “Qt Vulkan” plugin enabled. When you ran `qmake` with `QT += vulkan`, qmake complained because no `qt6-vulkan` module was found in that MinGW build.
+   * **Fix attempt**: We commented out `QT += vulkan`, added `INCLUDEPATH += $$getenv(VULKAN_SDK)/Include` & `LIBS += -L$$getenv(VULKAN_SDK)/Lib -lvulkan-1`. That let us compile against the Vulkan SDK headers & library, but it meant **`QVulkanWindow` no longer existed** (because Qt’s Vulkan integration was missing).
+
+2. **Missing `setRenderer()` and missing `deviceFunctions()`**
+
+   * We tried using `QVulkanWindowRenderer` directly, but in Qt 6.9.0:
+
+     * `QVulkanWindow::setRenderer()` had been removed (older Qt let you call `setRenderer()` manually, but now you must subclass `QVulkanWindow` and override `createRenderer()`).
+     * We changed `main.cpp` to subclass `QVulkanWindow` correctly, but still:
+   * We then tried to use `m_window = window();` inside `initResources()`, but the Qt API for getting the `QWindow*` from a `QVulkanWindowRenderer` had changed. We needed to cast via `static_cast<QVulkanWindow*>(const_cast<QWindow*>(QVulkanWindowRenderer::window()));`.
+   * **But** even after those fixes, `m_window->deviceFunctions()` didn’t exist—because the Qt build lacked the `Qt6::Vulkan` plugin that supplies `deviceFunctions()`. Instead, Qt had only `QVulkanFunctions` (which is instance‐level, not device‐level). The calls to `vkCreateBuffer`, `vkCmdDraw`, etc., were all device‐level APIs, and those live in `QVulkanDeviceFunctions`. Without the plugin, `m_window->deviceFunctions()` simply didn’t compile.
+
+3. **Missing `<set>` include & `VkClearValue` vs `VkClearColorValue`**
+
+   * When we switched to the GLFW code, minor C++ compile errors popped up:
+
+     * We used `std::set<uint32_t>` without `#include <set>`.
+     * In the command buffer recording, we assigned a `VkClearColorValue*` to a `const VkClearValue*` pointer. The fix was to wrap the color array inside a `VkClearValue` union structure (the correct field is `VkClearValue::color`).
+
+4. **Runtime “Failed to open file: shaders/triangle.vert.spv”**
+
+   * After switching to GLFW, the code tried to read `"shaders/triangle.vert.spv"` relative to the **current working directory**, which was `build/`—not the top‐level folder. We solved this by either manually copying the `.spv` into `build/shaders/` or adding a CMake `add_custom_command(POST_BUILD)` to copy them automatically.
+
+---
+
+### 1.4) Why it was so painful under Qt
+
+1. **Missing Qt-Vulkan plugin**: The biggest hurdle. Because your MinGW‐based Qt 6.9.0 didn’t include the Vulkan module, any reference to `QVulkanWindow`, `deviceFunctions()`, or `window()` in that context was a compiler hard-stop.
+2. **API churn**: Qt 6 changed some method names vs earlier Qt 5/Vulkan examples online.
+
+   * `QVulkanWindow::setRenderer()` → replaced by `createRenderer()`.
+   * `renderFunctions = m_window->functions()` vs `m_window->deviceFunctions()`.
+   * `QVulkanWindowRenderer::window()` returns `QWindow*`, not directly `QVulkanWindow*`.
+3. **Toolchain mismatch**: The Qt version and the way it was installed didn’t line up exactly with the official “Qt with Vulkan support” distributions, so qmake thought “no module named vulkan” even though Qt shipped `QT += vulkan` logic in other builds.
+
+Long story short, that chain of missing dependencies and API changes turned a simple triangle into a week-long boss fight.
+
+---
+
+## 2) The “GLFW + Pure Vulkan” Escape Hatch
+
+Once we realized we weren’t going to get the Qt-based approach working without reinstalling Qt, we switched strategy: **drop Qt’s Vulkan wrapper entirely**, use **GLFW** (a tiny, single‐purpose library for creating windows + surfaces) and call the Vulkan SDK directly. That gave us total control over each Vulkan step and only depended on:
+
+* **Vulkan SDK** (must have `VULKAN_SDK` env var pointing to `D:\Vulkan\SDK\Installation`)
+* **GLFW** (must have header and library for MinGW)
+* **CMake** (to configure, copy shaders, and build)
+
+Below is an annotated walkthrough of exactly how the final “VulkN\_GLFW\_Triangle” code works:
+
+---
+
+### 2.1) Project Layout
+
+```
+VulkN_GLFW_Triangle/
+├── CMakeLists.txt
+├── main.cpp
+└── shaders/
+    ├── triangle.vert
+    ├── triangle.frag
+    └── compileShaders.bat
+```
+
+* `CMakeLists.txt` → configures include paths, libraries, copies SPIR-V into the build folder
+* `main.cpp` → the entire Vulkan initialization + render loop (no Qt)
+* `shaders/triangle.vert`, `triangle.frag` → GLSL source code
+* `shaders/compileShaders.bat` → batch file to build SPIR-V from GLSL
+
+---
+
+### 2.2) CMakeLists.txt Explained
+
+```cmake
+cmake_minimum_required(VERSION 3.15)
+project(VulkN_GLFW_Triangle)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# 1) Locate Vulkan SDK via environment VULKAN_SDK
+if(NOT DEFINED ENV{VULKAN_SDK})
+  message(FATAL_ERROR "Please set VULKAN_SDK (e.g. D:/Vulkan/SDK/Installation)")
+endif()
+set(VULKAN_INCLUDE_DIRS   $ENV{VULKAN_SDK}/Include)
+set(VULKAN_LIBRARY_DIRS   $ENV{VULKAN_SDK}/Lib)
+find_library(VULKAN_LIBRARY NAMES vulkan-1 PATHS ${VULKAN_LIBRARY_DIRS})
+
+# 2) Tell CMake where to find GLFW includes & lib (you downloaded these)
+set(GLFW_INCLUDE_DIR      "D:/Libraries/glfw-3.3.8/include")
+set(GLFW_LIBRARY          "D:/Libraries/glfw-3.3.8/lib-mingw/libglfw3.a")
+
+include_directories(
+  ${VULKAN_INCLUDE_DIRS}
+  ${GLFW_INCLUDE_DIR}
+)
+link_directories(
+  ${VULKAN_LIBRARY_DIRS}
+)
+
+# 3) Define our executable
+add_executable(VulkN_Triangle main.cpp)
+
+# 4) Link it with Vulkan and GLFW
+target_link_libraries(VulkN_Triangle
+  ${VULKAN_LIBRARY}
+  ${GLFW_LIBRARY}
+)
+
+# 5) After building, copy the compiled SPIR-V shaders into build/shaders/
+add_custom_command(
+  TARGET VulkN_Triangle POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/shaders
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/shaders/triangle.vert.spv
+          ${CMAKE_BINARY_DIR}/shaders/triangle.vert.spv
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/shaders/triangle.frag.spv
+          ${CMAKE_BINARY_DIR}/shaders/triangle.frag.spv
+  COMMENT "Copy SPIR-V files into build/shaders"
+)
+```
+
+**Why these steps matter:**
+
+1. **`find_library(vulkan-1)`** ensures we link against `vulkan-1.dll` (or the static equivalent) that came with the SDK.
+2. **GLFW paths** tell the compiler, “When you see `#include <GLFW/glfw3.h>`, look under `D:/Libraries/glfw-3.3.8/include`”—and link to `libglfw3.a`.
+3. **`add_custom_command(... POST_BUILD ...)`** runs *after* the EXE is compiled, making a `build/shaders/` folder and copying the two `.spv` binaries so that at run-time `main.cpp` can do `readFile("shaders/triangle.vert.spv")` from inside `build/`.
+
+---
+
+### 2.3) `main.cpp` Walkthrough
+
+```cpp
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>    // automatically includes Vulkan headers 
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <stdexcept>
+#include <cstdlib>
+#include <set>             // needed for std::set<uint32_t>
+```
+
+* **`GLFW_INCLUDE_VULKAN`** means “when you include `glfw3.h`, also include `vulkan.h` for you.”
+
+#### 2.3.1) Helper: `readFile()`
+
+```cpp
+static std::vector<char> readFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+    if (!file.is_open())
+        throw std::runtime_error("Failed to open file: " + filename);
+
+    size_t fileSize = (size_t) file.tellg();
+    std::vector<char> buffer(fileSize);
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    return buffer;
+}
+```
+
+* Opens a binary file (e.g. `triangle.vert.spv`),   `tellg()` → size, allocate a `std::vector<char>` of that exact size, read all bytes, return them. We’ll pass that vector’s data pointer into `VkShaderModuleCreateInfo`.
+
+#### 2.3.2) The `TriangleApp` Class
+
+We encapsulate everything inside a class so that resources (Vk handles) live on the heap and clean up in the destructor or `cleanup()`:
+
+```cpp
+class TriangleApp {
+public:
+    void run() {
+        initWindow();
+        initVulkan();
+        mainLoop();
+        cleanup();
+    }
+private:
+    // GLFW window + Vulkan objects:
+    GLFWwindow*         window = nullptr;
+    VkInstance          instance = VK_NULL_HANDLE;
+    VkPhysicalDevice    physicalDevice = VK_NULL_HANDLE;
+    VkDevice            device = VK_NULL_HANDLE;
+    VkQueue             graphicsQueue = VK_NULL_HANDLE;
+    VkSurfaceKHR        surface = VK_NULL_HANDLE;
+    VkSwapchainKHR      swapChain = VK_NULL_HANDLE;
+    VkFormat            swapChainImageFormat;
+    VkExtent2D          swapChainExtent;
+    std::vector<VkImage> swapChainImages;
+    std::vector<VkImageView> swapChainImageViews;
+    VkRenderPass        renderPass = VK_NULL_HANDLE;
+    VkPipelineLayout    pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline          graphicsPipeline = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> swapChainFramebuffers;
+    VkCommandPool       commandPool = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> commandBuffers;
+    VkSemaphore         imageAvailableSemaphore = VK_NULL_HANDLE;
+    VkSemaphore         renderFinishedSemaphore = VK_NULL_HANDLE;
+```
+
+* **These are all the core Vulkan objects** we need to create a “presentable, double-buffered” pipeline:
+
+  * `VkInstance` → our connection to the Vulkan loader
+  * `VkPhysicalDevice` → chosen GPU
+  * `VkDevice` + `VkQueue` → logical device + graphics queue
+  * `VkSurfaceKHR` → the OS window surface (GLFW creates this)
+  * `VkSwapchainKHR` → the set of images / framebuffers we’ll present
+  * `VkImageView` → views of each swapchain image
+  * `VkRenderPass` → describes how we clear & write to attachments each frame
+  * `VkPipelineLayout` + `VkPipeline` → the full GPU pipeline (shaders + fixed-function states)
+  * `VkFramebuffer[]` → one framebuffer per swapchain image
+  * `VkCommandPool` + `VkCommandBuffer[]` → record draw commands for each frame
+  * `VkSemaphore`s → sync GPU/CPU for “acquire image → draw → present”
+
+Below, I’ll walk you through each `initXxx()` in roughly the order we call them.
+
+---
+
+##### 2.3.2.1) `initWindow()`
+
+```cpp
+void initWindow() {
+    if (!glfwInit())
+        throw std::runtime_error("Failed to initialize GLFW");
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    window = glfwCreateWindow(800, 600, "Vulkan Triangle (GLFW)", nullptr, nullptr);
+    if (!window)
+        throw std::runtime_error("Failed to create GLFW window");
+}
+```
+
+* We call `glfwInit()`.
+* We tell GLFW “*don’t create an OpenGL context*” by setting `GLFW_CLIENT_API = GLFW_NO_API`.
+* We create an 800×600 window titled “Vulkan Triangle (GLFW)”.
+* Under the hood, `glfwCreateWindow()` will produce a native window handle (HWND on Windows). We later use `glfwCreateWindowSurface(instance, window, ...)` to attach a Vulkan `VkSurfaceKHR` to that same HWND.
+
+---
+
+##### 2.3.2.2) `initVulkan()`
+
+In `run()`, right after `initWindow()`, we call:
+
+```cpp
+initVulkan();
+```
+
+This method does everything from “<u>create a VkInstance</u>” → “<u>build the swapchain + pipeline</u>” → “<u>allocate command buffers + semaphores</u>”.
+
+###### a) `createInstance()`
+
+```cpp
+VkApplicationInfo appInfo = {};
+appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+appInfo.pApplicationName = "Triangle";
+appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+appInfo.pEngineName = "No Engine";
+appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+appInfo.apiVersion = VK_API_VERSION_1_0;
+
+// Query GLFW for required instance extensions:
+uint32_t glfwExtensionCount = 0;
+const char** glfwExtensions;
+glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+
+// Set up VkInstanceCreateInfo
+VkInstanceCreateInfo createInfo = {};
+createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+createInfo.pApplicationInfo = &appInfo;
+createInfo.enabledExtensionCount = glfwExtensionCount;
+createInfo.ppEnabledExtensionNames = glfwExtensions;
+createInfo.enabledLayerCount = 0; // No validation layers for simplicity
+
+if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create Vulkan instance");
+}
+```
+
+* We fill in an `VkApplicationInfo` (mostly for driver optimization—can actually be `nullptr`).
+* We ask **GLFW** which instance-level extensions are required to create a surface on this platform (e.g. `"VK_KHR_surface"`, `"VK_KHR_win32_surface"` on Windows).
+* We feed those into `vkCreateInstance()`.
+* If that call fails, no GPU work is possible—bail out.
+
+###### b) `createSurface()`
+
+```cpp
+if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create window surface");
+}
+```
+
+* **GLFW** wraps the platform‐specific code for `vkCreateWin32SurfaceKHR( instance, hinstance, hwnd, &surface )`.
+* Now `surface` is a valid `VkSurfaceKHR` tied to our GLFW window.
+
+###### c) `pickPhysicalDevice()`
+
+```cpp
+uint32_t deviceCount = 0;
+vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+if (deviceCount == 0) {
+    throw std::runtime_error("No Vulkan GPU found");
+}
+std::vector<VkPhysicalDevice> devices(deviceCount);
+vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+
+for (auto dev : devices) {
+    if (isDeviceSuitable(dev)) {
+        physicalDevice = dev;
+        break;
+    }
+}
+if (physicalDevice == VK_NULL_HANDLE) {
+    throw std::runtime_error("Failed to find a suitable GPU");
+}
+```
+
+* We ask Vulkan: “How many physical GPUs do you see?”.
+* We retrieve all `VkPhysicalDevice` handles.
+* We test each one in `isDeviceSuitable(dev)` for whether it has both a **graphics queue** and can present to our `surface`. The first that passes becomes `physicalDevice`.
+
+##### c.1) `isDeviceSuitable(VkPhysicalDevice dev)`
+
+```cpp
+uint32_t queueFamilyCount = 0;
+vkGetPhysicalDeviceQueueFamilyProperties(dev, &queueFamilyCount, nullptr);
+std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+vkGetPhysicalDeviceQueueFamilyProperties(dev, &queueFamilyCount, queueFamilies.data());
+
+bool graphicsFamily = false;
+bool presentFamily = false;
+for (uint32_t i = 0; i < queueFamilyCount; i++) {
+    if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        graphicsFamily = true;
+    }
+    VkBool32 presentSupport = false;
+    vkGetPhysicalDeviceSurfaceSupportKHR(dev, i, surface, &presentSupport);
+    if (presentSupport) {
+        presentFamily = true;
+    }
+    if (graphicsFamily && presentFamily) {
+        return true;
+    }
+}
+return false;
+```
+
+* We query all “queue families” (a queue family is a category of command queues the GPU offers—some can do graphics, some compute, some copy, etc.).
+* We check for any family that has `VK_QUEUE_GRAPHICS_BIT`. That’s our “graphics queue.”
+* We call `vkGetPhysicalDeviceSurfaceSupportKHR()` to check if that same family index can present to our `surface`.
+* If we find ANY index `i` where both are true, we return `true` (device is suitable). Otherwise `false`.
+
+###### d) `createLogicalDevice()`
+
+```cpp
+// Figure out the queue family indices again
+uint32_t queueFamilyCount = 0;
+vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+int graphicsFamilyIdx = -1;
+int presentFamilyIdx = -1;
+for (int i = 0; i < (int)queueFamilyCount; i++) {
+    if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+        graphicsFamilyIdx = i;
+    VkBool32 presentSupport = false;
+    vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, i, surface, &presentSupport);
+    if (presentSupport)
+        presentFamilyIdx = i;
+}
+
+std::set<uint32_t> uniqueFamilies = { (uint32_t)graphicsFamilyIdx, (uint32_t)presentFamilyIdx };
+float queuePriority = 1.0f;
+std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+for (uint32_t family : uniqueFamilies) {
+    VkDeviceQueueCreateInfo queueInfo = {};
+    queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueInfo.queueFamilyIndex = family;
+    queueInfo.queueCount = 1;
+    queueInfo.pQueuePriorities = &queuePriority;
+    queueCreateInfos.push_back(queueInfo);
+}
+
+VkPhysicalDeviceFeatures deviceFeatures = {};
+VkDeviceCreateInfo createInfo = {};
+createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+createInfo.queueCreateInfoCount = (uint32_t)queueCreateInfos.size();
+createInfo.pQueueCreateInfos = queueCreateInfos.data();
+createInfo.pEnabledFeatures = &deviceFeatures;
+
+// We need the swapchain extension on the device
+const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+createInfo.enabledExtensionCount = 1;
+createInfo.ppEnabledExtensionNames = deviceExtensions;
+
+if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create logical device");
+}
+
+vkGetDeviceQueue(device, graphicsFamilyIdx, 0, &graphicsQueue);
+```
+
+* We re-inspect queue families to get `graphicsFamilyIdx` and `presentFamilyIdx`.
+* We put them into a `std::set<uint32_t>` so if they’re the same index (common on many GPUs), we only request one queue. Otherwise, we request two separate queues.
+* We set up a single `VkDeviceQueueCreateInfo` for each unique family index, with priority `1.0f`.
+* We request `VK_KHR_swapchain` in `enabledExtensionNames` because the swapchain is a device extension.
+* We call `vkCreateDevice(...)` → yields a `VkDevice` handle and implicitly creates all requested queues.
+* We call `vkGetDeviceQueue(device, graphicsFamilyIdx, 0, &graphicsQueue)` to store the one queue we’ll actually use for drawing + presenting (we assume the present queue is the same ID if index matches or we’d retrieve it separately if they differ).
+
+###### e) `createSwapChain()`
+
+```cpp
+VkSurfaceCapabilitiesKHR surfCaps;
+vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfCaps);
+
+VkSurfaceFormatKHR surfaceFormat = {};
+surfaceFormat.format = VK_FORMAT_B8G8R8A8_SRGB;
+surfaceFormat.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+
+VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+
+swapChainExtent = surfCaps.currentExtent;
+
+uint32_t imageCount = surfCaps.minImageCount + 1;
+if (surfCaps.maxImageCount > 0 && imageCount > surfCaps.maxImageCount)
+    imageCount = surfCaps.maxImageCount;
+
+VkSwapchainCreateInfoKHR createInfo = {};
+createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+createInfo.surface = surface;
+createInfo.minImageCount = imageCount;
+createInfo.imageFormat = surfaceFormat.format;
+createInfo.imageColorSpace = surfaceFormat.colorSpace;
+createInfo.imageExtent = swapChainExtent;
+createInfo.imageArrayLayers = 1;
+createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+createInfo.preTransform = surfCaps.currentTransform;
+createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+createInfo.presentMode = presentMode;
+createInfo.clipped = VK_TRUE;
+createInfo.oldSwapchain = VK_NULL_HANDLE;
+
+if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create swap chain");
+}
+
+vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);
+swapChainImages.resize(imageCount);
+vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
+swapChainImageFormat = surfaceFormat.format;
+```
+
+* We query `VkSurfaceCapabilitiesKHR` to get `minImageCount`/`maxImageCount`/`currentExtent`.
+* We pick a `surfaceFormat` of `VK_FORMAT_B8G8R8A8_SRGB` (RGB8 with sRGB colorspace) and `VK_PRESENT_MODE_FIFO_KHR` (guaranteed on all platforms to be available).
+* We use `surfCaps.currentExtent` (i.e. the window’s resolution) as `swapChainExtent`.
+* We request `minImageCount + 1` images (triple buffering). If that exceeds `maxImageCount`, clamp it.
+* We call `vkCreateSwapchainKHR(...)`.
+* Then we call `vkGetSwapchainImagesKHR(...)` twice: first to get `imageCount`, then to fill a `std::vector<VkImage> swapChainImages` with the actual `VkImage` handles.
+* We store `swapChainImageFormat` to use when we create image views and the render pass.
+
+###### f) `createImageViews()`
+
+```cpp
+swapChainImageViews.resize(swapChainImages.size());
+for (size_t i = 0; i < swapChainImages.size(); i++) {
+    VkImageViewCreateInfo viewInfo = {};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = swapChainImages[i];
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = swapChainImageFormat;
+    viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &viewInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create image views");
+    }
+}
+```
+
+* A `VkImage` by itself is just a GPU resource with no meaning to the pipeline. An **image view** tells Vulkan “interpret this image as a 2D texture of format `VK_FORMAT_B8G8R8A8_SRGB`, one mip level, one layer.”
+* We create one `VkImageView` for each swapchain `VkImage`.
+
+###### g) `createRenderPass()`
+
+```cpp
+VkAttachmentDescription colorAttachment = {};
+colorAttachment.format = swapChainImageFormat;
+colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;   // clear at start
+colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // store results
+colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+VkAttachmentReference colorAttachmentRef = {};
+colorAttachmentRef.attachment = 0;
+colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+VkSubpassDescription subpass = {};
+subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+subpass.colorAttachmentCount = 1;
+subpass.pColorAttachments = &colorAttachmentRef;
+
+VkRenderPassCreateInfo renderPassInfo = {};
+renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+renderPassInfo.attachmentCount = 1;
+renderPassInfo.pAttachments = &colorAttachment;
+renderPassInfo.subpassCount = 1;
+renderPassInfo.pSubpasses = &subpass;
+
+if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create render pass");
+}
+```
+
+* A **render pass** describes **how you clear, draw, and transition attachments** each frame.
+* We have one color attachment, with the swapchain’s image format. We say:
+
+  * `loadOp = CLEAR` → at the start of the pass, clear it to the clear color we provide.
+  * `storeOp = STORE` → after the pass, store final pixels so they can be presented.
+  * `initialLayout = UNDEFINED` → we don’t care what was in the image before (we’ll clear anyway).
+  * `finalLayout = PRESENT_SRC_KHR` → after drawing, the image goes to a layout ready for presenting to the screen.
+* We define one `VkSubpassDescription`: a subpass of type “GRAPHICS” using one `colorAttachmentRef`.
+* `vkCreateRenderPass(...)` bundles it all.
+
+###### h) `createGraphicsPipeline()`
+
+This is where we:
+
+1. Read the SPIR-V blobs (`triangle.vert.spv`, `triangle.frag.spv`)
+2. Create two `VkShaderModule`s
+3. Define all the fixed‐function state + programmable state
+4. Call `vkCreateGraphicsPipelines(...)`
+
+```cpp
+// 1) Read SPIR-V
+auto vertShaderCode = readFile("shaders/triangle.vert.spv");
+auto fragShaderCode = readFile("shaders/triangle.frag.spv");
+
+// 2) Create VkShaderModule for vert
+VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+// and for frag
+VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+// 3) Pipeline Shader Stage Infos
+VkPipelineShaderStageCreateInfo vertStageInfo = {};
+vertStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+vertStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+vertStageInfo.module = vertShaderModule;
+vertStageInfo.pName = "main";
+
+VkPipelineShaderStageCreateInfo fragStageInfo = {};
+fragStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+fragStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+fragStageInfo.module = fragShaderModule;
+fragStageInfo.pName = "main";
+
+VkPipelineShaderStageCreateInfo shaderStages[] = { vertStageInfo, fragStageInfo };
+
+// 4) No vertex buffers (we use gl_VertexIndex), so:
+VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
+vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+vertexInputInfo.vertexBindingDescriptionCount = 0;
+vertexInputInfo.vertexAttributeDescriptionCount = 0;
+
+// 5) Input assembly: triangle list
+VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
+inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+// 6) Viewport & scissor (full‐screen)
+VkViewport viewport = {};
+viewport.x = 0.0f;
+viewport.y = 0.0f;
+viewport.width = (float) swapChainExtent.width;
+viewport.height = (float) swapChainExtent.height;
+viewport.minDepth = 0.0f;
+viewport.maxDepth = 1.0f;
+
+VkRect2D scissor = {};
+scissor.offset = {0, 0};
+scissor.extent = swapChainExtent;
+
+VkPipelineViewportStateCreateInfo viewportState = {};
+viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+viewportState.viewportCount = 1;
+viewportState.pViewports = &viewport;
+viewportState.scissorCount = 1;
+viewportState.pScissors = &scissor;
+
+// 7) Rasterizer
+VkPipelineRasterizationStateCreateInfo rasterizer = {};
+rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+rasterizer.depthClampEnable = VK_FALSE;
+rasterizer.rasterizerDiscardEnable = VK_FALSE;
+rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+rasterizer.lineWidth = 1.0f;
+rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+rasterizer.depthBiasEnable = VK_FALSE;
+
+// 8) Multisampling (off)
+VkPipelineMultisampleStateCreateInfo multisampling = {};
+multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+multisampling.sampleShadingEnable = VK_FALSE;
+multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+// 9) Color Blending (off, just overwrite)
+VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+colorBlendAttachment.colorWriteMask =
+    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+colorBlendAttachment.blendEnable = VK_FALSE;
+
+VkPipelineColorBlendStateCreateInfo colorBlending = {};
+colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+colorBlending.logicOpEnable = VK_FALSE;
+colorBlending.attachmentCount = 1;
+colorBlending.pAttachments = &colorBlendAttachment;
+
+// 10) Pipeline Layout (no uniforms or push constants)
+VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+pipelineLayoutInfo.setLayoutCount = 0;
+pipelineLayoutInfo.pushConstantRangeCount = 0;
+if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create pipeline layout");
+}
+
+// 11) Combine everything
+VkGraphicsPipelineCreateInfo pipelineInfo = {};
+pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+pipelineInfo.stageCount = 2;
+pipelineInfo.pStages = shaderStages;
+pipelineInfo.pVertexInputState = &vertexInputInfo;
+pipelineInfo.pInputAssemblyState = &inputAssembly;
+pipelineInfo.pViewportState = &viewportState;
+pipelineInfo.pRasterizationState = &rasterizer;
+pipelineInfo.pMultisampleState = &multisampling;
+pipelineInfo.pColorBlendState = &colorBlending;
+pipelineInfo.layout = pipelineLayout;
+pipelineInfo.renderPass = renderPass;
+pipelineInfo.subpass = 0;
+
+if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create graphics pipeline");
+}
+
+// 12) We can now delete shader modules (they’re baked into the pipeline)
+vkDestroyShaderModule(device, fragShaderModule, nullptr);
+vkDestroyShaderModule(device, vertShaderModule, nullptr);
+```
+
+* **No vertex buffers**: we’re not sending any `VkBuffer`. Instead, our vertex shader uses `gl_VertexIndex` to look up from a built-in array of positions and colors.
+* We create a **pipeline layout with zero descriptor sets** because we have no uniforms/textures.
+* We set `renderPass` (the one from `createRenderPass()`) and `subpass = 0`.
+* After building the pipeline, we immediately destroy the `VkShaderModule`s since they’re no longer needed in memory—Vulkan keeps a copy internally in the pipeline.
+
+###### i) `createFramebuffers()`
+
+```cpp
+swapChainFramebuffers.resize(swapChainImageViews.size());
+for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+    VkImageView attachments[] = { swapChainImageViews[i] };
+
+    VkFramebufferCreateInfo framebufferInfo = {};
+    framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebufferInfo.renderPass = renderPass;
+    framebufferInfo.attachmentCount = 1;
+    framebufferInfo.pAttachments = attachments;
+    framebufferInfo.width = swapChainExtent.width;
+    framebufferInfo.height = swapChainExtent.height;
+    framebufferInfo.layers = 1;
+
+    if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create framebuffer");
+    }
+}
+```
+
+* We need one **VkFramebuffer** per swapchain image. A framebuffer bundles a specific `VkRenderPass` and one or more attachments (in our case, just the color attachment from `swapChainImageViews[i]`).
+* We pass `renderPass` and `swapChainImageViews[i]` to create each `VkFramebuffer`.
+
+###### j) `createCommandPool()` + `createCommandBuffers()`
+
+```cpp
+// Find the graphics queue family index again
+uint32_t queueFamilyCount = 0;
+vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+int graphicsFamilyIdx = -1;
+for (int i = 0; i < (int)queueFamilyCount; i++) {
+    if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        graphicsFamilyIdx = i;
+        break;
+    }
+}
+
+VkCommandPoolCreateInfo poolInfo = {};
+poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+poolInfo.queueFamilyIndex = graphicsFamilyIdx;
+
+if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create command pool");
+}
+
+// Allocate one command buffer per framebuffer
+commandBuffers.resize(swapChainFramebuffers.size());
+VkCommandBufferAllocateInfo allocInfo = {};
+allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+allocInfo.commandPool = commandPool;
+allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
+
+if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to allocate command buffers");
+}
+
+for (size_t i = 0; i < commandBuffers.size(); i++) {
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+    vkBeginCommandBuffer(commandBuffers[i], &beginInfo);
+
+    VkRenderPassBeginInfo renderPassInfo = {};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = renderPass;
+    renderPassInfo.framebuffer = swapChainFramebuffers[i];
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = swapChainExtent;
+
+    VkClearValue clearValue = {};
+    clearValue.color = { {0.0f, 0.0f, 0.0f, 1.0f} };
+    renderPassInfo.clearValueCount = 1;
+    renderPassInfo.pClearValues = &clearValue;
+
+    vkCmdBeginRenderPass(commandBuffers[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+    vkCmdDraw(commandBuffers[i], 3, 1, 0, 0);
+
+    vkCmdEndRenderPass(commandBuffers[i]);
+
+    if (vkEndCommandBuffer(commandBuffers[i]) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to record command buffer");
+    }
+}
+```
+
+* We create a **`VkCommandPool`** for the graphics queue family.
+* We allocate exactly as many \*\*`VkCommandBuffer`\*\*s as there are framebuffers (one command buffer per swapchain image).
+* For each command buffer:
+
+  1. `vkBeginCommandBuffer(...)`
+  2. Fill `VkRenderPassBeginInfo`:
+
+     * `renderPass = renderPass` from earlier
+     * `framebuffer = swapChainFramebuffers[i]`
+     * `renderArea = the full screen`
+     * `pClearValues = &VkClearValue { clearColor }` to clear to black.
+  3. `vkCmdBeginRenderPass(...)`
+  4. `vkCmdBindPipeline(..., graphicsPipeline)`
+  5. `vkCmdDraw(..., 3, 1, 0, 0)` → draw our triangle (3 vertices, no vertex buffers).
+  6. `vkCmdEndRenderPass(...)`
+  7. `vkEndCommandBuffer(...)`
+
+Now each `commandBuffers[i]` contains the exact sequence to render a black‐cleared screen + a single triangle at that index’s framebuffer.
+
+###### k) `createSemaphores()`
+
+```cpp
+VkSemaphoreCreateInfo semaphoreInfo = {};
+semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
+    vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS) {
+    throw std::runtime_error("Failed to create semaphores");
+}
+```
+
+* We need two semaphores:
+
+  * **`imageAvailableSemaphore`**: signals when `vkAcquireNextImageKHR()` has an image ready for us to draw into
+  * **`renderFinishedSemaphore`**: signals when drawing is finished and the image is ready to be presented
+
+###### l) `mainLoop()` + `drawFrame()`
+
+```cpp
+void mainLoop() {
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+        drawFrame();
+    }
+    vkDeviceWaitIdle(device);
+}
+
+void drawFrame() {
+    uint32_t imageIndex;
+    vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
+    VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
+
+    VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to submit draw command buffer");
+    }
+
+    VkPresentInfoKHR presentInfo = {};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = signalSemaphores;
+
+    VkSwapchainKHR swapChains[] = { swapChain };
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = swapChains;
+    presentInfo.pImageIndices = &imageIndex;
+
+    vkQueuePresentKHR(graphicsQueue, &presentInfo);
+    vkQueueWaitIdle(graphicsQueue);
+}
+```
+
+1. **`vkAcquireNextImageKHR(...)`**
+
+   * Tells Vulkan: “Give me the index (0..N-1) of the next available swapchain image for drawing.”
+   * We pass `imageAvailableSemaphore` so that when the image is ready, that semaphore will be signaled.
+2. We fill `VkSubmitInfo` to submit to the **graphics queue**:
+
+   * `pWaitSemaphores = &imageAvailableSemaphore` → wait until the image is available
+   * `pWaitDstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT` → we’ll wait in the color‐attachment stage
+   * `pCommandBuffers = &commandBuffers[imageIndex]` → execute exactly that pre-recorded command buffer (clears + draws the triangle into `framebuffer[i]`).
+   * `pSignalSemaphores = &renderFinishedSemaphore` → when GPU is done drawing, signal `renderFinishedSemaphore`.
+3. `vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE)` → queue the command.
+4. Build `VkPresentInfoKHR`:
+
+   * `waitSemaphoreCount = 1`, `pWaitSemaphores = &renderFinishedSemaphore` → wait until the draw finishes.
+   * `pSwapchains = &swapChain`, `pImageIndices = &imageIndex` → present that same image.
+5. `vkQueuePresentKHR(graphicsQueue, &presentInfo)` → queue the present.
+6. `vkQueueWaitIdle(graphicsQueue)` → wait for the present to finish. (In a real engine, you wouldn’t wait every frame, but for a simple example it’s fine.)
+
+That completes one frame. In the loop, we poll GLFW events, call `drawFrame()`, loop until the window is closed, then do `vkDeviceWaitIdle()` to wait for all GPU work before tearing everything down.
+
+###### m) `cleanup()`
+
+```cpp
+vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
+vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
+
+vkDestroyCommandPool(device, commandPool, nullptr);
+
+for (auto framebuffer : swapChainFramebuffers) {
+    vkDestroyFramebuffer(device, framebuffer, nullptr);
+}
+
+vkDestroyPipeline(device, graphicsPipeline, nullptr);
+vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+vkDestroyRenderPass(device, renderPass, nullptr);
+
+for (auto imageView : swapChainImageViews) {
+    vkDestroyImageView(device, imageView, nullptr);
+}
+
+vkDestroySwapchainKHR(device, swapChain, nullptr);
+vkDestroyDevice(device, nullptr);
+vkDestroySurfaceKHR(instance, surface, nullptr);
+vkDestroyInstance(instance, nullptr);
+
+glfwDestroyWindow(window);
+glfwTerminate();
+```
+
+* We destroy **in the reverse order** of creation:
+
+  1. Semaphores
+  2. Command pool
+  3. Framebuffers
+  4. Graphics pipeline + layout + render pass
+  5. Image views
+  6. Swapchain
+  7. Device
+  8. Surface
+  9. Instance
+  10. GLFW window & terminate
+
+This ensures no resource is freed before its dependents are destroyed.
+
+---
+
+### 2.4) Shaders + SPIR-V Batch Script
+
+In `shaders/`:
+
+* **`triangle.vert`** (GLSL)
+
+  ```glsl
+  #version 450
+  layout(location = 0) out vec3 fragColor;
+
+  vec2 positions[3] = vec2[](
+      vec2(0.0, -0.5),
+      vec2(0.5, 0.5),
+      vec2(-0.5, 0.5)
+  );
+  vec3 colors[3] = vec3[](
+      vec3(1.0, 0.0, 0.0),
+      vec3(0.0, 1.0, 0.0),
+      vec3(0.0, 0.0, 1.0)
+  );
+  void main() {
+      gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+      fragColor = colors[gl_VertexIndex];
+  }
+  ```
+
+  * We never pass any vertex buffer. Instead, `gl_VertexIndex` (0, 1, 2) indexes into our hardcoded `positions[]` and `colors[]`.
+
+* **`triangle.frag`** (GLSL)
+
+  ```glsl
+  #version 450
+  layout(location = 0) in vec3 fragColor;
+  layout(location = 0) out vec4 outColor;
+  void main() {
+      outColor = vec4(fragColor, 1.0);
+  }
+  ```
+
+* **`compileShaders.bat`**:
+
+  ```bat
+  @echo off
+  if not defined VULKAN_SDK (
+      echo [ERROR] VULKAN_SDK not defined.
+      exit /b 1
+  )
+  cd /d %~dp0
+  "%VULKAN_SDK%\Bin\glslangValidator.exe" -V triangle.vert -o triangle.vert.spv
+  "%VULKAN_SDK%\Bin\glslangValidator.exe" -V triangle.frag -o triangle.frag.spv
+  echo [INFO] SPIR-V shaders generated.
+  pause
+  ```
+
+* You run `compileShaders.bat` from **PowerShell** or **cmd** in the `shaders/` folder. It produces:
+
+  ```
+  shaders/triangle.vert.spv
+  shaders/triangle.frag.spv
+  ```
+
+---
+
+### 2.5) Build & Run
+
+1. **Open a MinGW shell** (the one that has `cmake`, `make`, etc. in `PATH`).
+
+2. From `VulkN_GLFW_Triangle/`:
+
+   ```bat
+   mkdir build
+   cd build
+   cmake .. -G "MinGW Makefiles"
+   mingw32-make
+   ```
+
+   * CMake configures the project, links Vulkan + GLFW, and emits a Makefile.
+   * `mingw32-make` compiles and links `VulkN_Triangle.exe`.
+   * The post-build command copies `triangle.vert.spv` & `triangle.frag.spv` into `build/shaders/` automatically.
+
+3. In the same `build/` folder, run:
+
+   ```bat
+   VulkN_Triangle.exe
+   ```
+
+   * It finds `shaders/triangle.vert.spv` and `shaders/triangle.frag.spv` (because of the CMake copy).
+   * It goes through the entire Vulkan init + draw loop and pops up a window with a red-green-blue triangle on a black background.
+
+---
+
+## 3) Recap: All the Core “Vulkan Triangle” Steps
+
+By the time that triangle appears, you have effectively:
+
+1. **Created a Vulkan Instance** (`vkCreateInstance`)
+2. **Created a Window Surface** (`glfwCreateWindowSurface` which wraps `vkCreateWin32SurfaceKHR`)
+3. **Picked a Physical Device (GPU)** that supports graphics + present
+4. **Created a Logical Device** with a Graphics queue and the `VK_KHR_swapchain` extension
+5. **Created a Swapchain** (`vkCreateSwapchainKHR`)—choosing image count, format, present mode, extent
+6. **Gotten the Swapchain Images** (`vkGetSwapchainImagesKHR`) and made one `VkImageView` per image
+7. **Created a Render Pass** that clears to black and then writes to a color attachment that will be presented
+8. **Loaded and Compiled GLSL into SPIR-V** via `glslangValidator` → generated two `.spv` files
+9. **Created Shader Modules** (`vkCreateShaderModule`) from those `.spv` blobs
+10. **Set Up a Graphics Pipeline**:
+
+    * Programmable stages (vertex + fragment),
+    * No vertex buffers (using `gl_VertexIndex`),
+    * Viewport/scissor matching the swapchain extent,
+    * Rasterizer (fill mode, back-face cull, front face clockwise),
+    * No multisampling,
+    * Simple color blending (off),
+    * Pipeline layout with no descriptor sets.
+11. **Created a Framebuffer for Each Swapchain Image** (bundle the `VkImageView` into a `VkFramebuffer`)
+12. **Created a Command Pool & Command Buffers**, one per framebuffer, and recorded each buffer to:
+
+    * Start render pass (clear black),
+    * Bind the pipeline,
+    * Issue `vkCmdDraw(3, 1, 0, 0)`,
+    * End render pass.
+13. **Created Semaphores** (one to wait on image availability, one to signal render-finished)
+14. **In the Main Loop**:
+
+    * `vkAcquireNextImageKHR(..., imageAvailableSemaphore, &imageIndex)`
+    * Build a `VkSubmitInfo` that waits on `imageAvailableSemaphore`, submits `commandBuffers[imageIndex]`, and signals `renderFinishedSemaphore`
+    * `vkQueueSubmit(graphicsQueue, ...)`
+    * Build a `VkPresentInfoKHR` that waits on `renderFinishedSemaphore` and does `vkQueuePresentKHR(...)`
+    * `vkQueueWaitIdle(graphicsQueue)` to stall until the present is done (for a simple frame-by-frame).
+15. **Cleanup**, destroying everything in reverse order.
+
+That’s the **minimal yet complete path** to get a single colored triangle on the screen with Vulkan.
+
+---
+
+## 4) Why It Took a Week
+
+* **Missing Qt-Vulkan plugin** forced us to abandon `QVulkanWindowRenderer` (which should have been trivial) and instead reinvent every step in pure Vulkan.
+* **API mismatches** (wrong calls, missing includes, type mismatches like `VkClearValue`) forced multiple compile-error iterations.
+* **Shader path confusion** (the app looked into `build/shaders/`, not top-level) required copying SPIR-V or adjusting CMake.
+* **Learning curve**: Even though we’re “copy-pasting,” Vulkan has a thousand little structs you must initialize exactly right. The smallest typo in a `VkSomethingCreateInfo`—forgetting to zero out a struct or missing a field—leads to obscure validation or a crash.
+
+By the end, you earned respect for:
+
+* How many objects Vulkan requires for a “simple” draw call
+* Why they say “*you don’t learn Vulkan in a weekend*”
+* Why engine devs build wrappers on top of this (e.g. bgfx, Magnum, Unreal) so users don’t have to wrestle with it every time
+
+---
+
+## 5) TL;DR of Everything We Did
+
+1. **Tried Qt + QVulkanWindow**
+
+   * `.pro` with `QT += vulkan` → failed because Qt build lacked Vulkan plugin
+   * Changed to manual `INCLUDEPATH`/`LIBS` → lost `QVulkanWindow` support (`deviceFunctions()` etc. vanished) → errors
+   * Tried to fix with casts & `QVulkanFunctions` vs `QVulkanDeviceFunctions` → still missing because Qt plugin was unavailable
+   * Conclusion: Qt approach was a dead end without reinstalling Qt with “Qt Shader Tools” / “Qt Vulkan” enabled.
+
+2. **Switched to GLFW + pure Vulkan**
+
+   * Created a `CMakeLists.txt` to find Vulkan SDK, GLFW include/lib, and copy shaders.
+   * Wrote a single `main.cpp` that:
+
+     1. Initializes GLFW window
+     2. Creates a Vulkan instance + surface
+     3. Picks a GPU + queue family
+     4. Creates logical device + swapchain
+     5. Makes image views + render pass
+     6. Builds graphics pipeline from compiled `.spv`
+     7. Creates framebuffers + command buffers
+     8. Creates semaphores
+     9. In a loop: acquire image, submit draw, present, wait idle
+     10. Clean up everything
+   * Fixed minor C++ errors (`#include <set>`, `VkClearValue` vs `VkClearColorValue`)
+   * Fixed runtime shader path by copying `.spv` into `build/shaders/` via CMake
+   * Launched the final `VulkN_Triangle.exe` and saw the red/green/blue triangle in an 800×600 window.
+
+---
+
+## 6) Key Lessons Learned
+
+* **Vulkan’s setup is extremely verbose**: dozens of objects and create calls for the “Hello Triangle.”
+* **GLFW + Vulkan = minimal external dependencies**: if you just want a quick triangle, it’s easier than Qt’s wrapper if your Qt wasn’t compiled with `QT += vulkan`.
+* **GLSL → SPIR-V**: you need a separate compiler (like `glslangValidator.exe`) to produce SPIR-V before you even link your C++ code.
+* **Synchronization**: even a trivial draw requires two semaphores (`imageAvailable` and `renderFinished`) and a single submit → present dance.
+* **Device vs Instance Functions**: understanding that `vkCreateInstance` comes from the global loader, but `vkCreateBuffer` or `vkCmdDraw` comes from a device-level dispatch table (`VkDevice`‐specific).
+* **Pipeline creation**: you must carefully set up every fixed‐function stage (rasterizer, input assembly, viewport, blending). The pipeline is sealed in a single call to `vkCreateGraphicsPipelines`.
+
+---
+
+### Final Thoughts
+
+You did it—**you conquered the dragon**. That three-vertex triangle forced you to understand:
+
+* The difference between **instance** and **device** function lists
+* Exactly how to set up a **swapchain** and **render pass**
+* Why you need a **framebuffer** per image view
+* How to record a **command buffer** that does “clear + draw + end pass”
+* How to do basic **semaphore synchronization** and queue submission/present
+
+For your next graphics quest, you’ll:
+
+* Add a **vertex buffer** / index buffer so you can draw arbitrary geometry
+* Upload a **texture image** and sample it in the fragment shader
+* Introduce a **uniform buffer** for MVP matrices and animate your triangle
+* Implement a **camera** and even a **0.5-second BT.709 gamma correction** in the shader
+
+But you’ve already tackled the hardest part: **bootstrapping Vulkan from scratch**. That, my friend, is the hallmark of a true Vulkan warrior. 🗡️🔥
+
+Congrats again—now go forth and build worlds! 🌍🚀 ongoing.

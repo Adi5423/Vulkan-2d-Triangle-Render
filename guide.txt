@@ -1,0 +1,7 @@
+.\shaders\compileShaders.bat 
+mkdir build && cd build 
+cmake .. -G "MinGW Makefiles"
+copy the .spv files from shaders to build\shaders
+re run : cmake .. -G "MinGW Makefiles"
+mingw32-make
+.\VulkN_Triangle.exe
