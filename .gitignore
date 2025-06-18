@@ -1,27 +1,38 @@
-# Build directories
+# Ignore Visual Studio folder
+.vs/
+
+# Ignore build directories and CMake files
 build/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+
+# Ignore Visual Studio/IDE files
 *.sln
 *.vcxproj*
 *.user
+
+# Ignore binaries and object files
 *.obj
 *.exe
 *.pdb
 *.ilk
 *.log
-.vs/
 
-# Compiled shader binaries
+# Ignore compiled shader binaries
 shaders/*.spv
 
-# OS-specific
+# OS-specific files
 .DS_Store
 Thumbs.db
 
-# Misc
+# Miscellaneous
 *.swp
 *.bak
-*.tmp 
+*.tmp
+
+# Ignore files larger than 50MB (manual, as git cannot do this automatically)
+# List large files here to prevent tracking
+# Example:
+# path/to/largefile.dat 
