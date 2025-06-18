@@ -40,7 +40,7 @@ A minimal, modern C++17 project that renders a triangle using Vulkan and GLFW. N
 
 > **Note:** Set the `VULKAN_SDK` environment variable (e.g. `D:/Vulkan/SDK/Installation`).
 
-> **Note:** Also update the (`GLFW_INCLUDE_DIR` and `GLFW_LIBRARY`)'s locations in the [CMakeLists.txt](CMakeLists.txt) at line no 18 and 19 , can also update the "VULKAN_SDK" from all occurences in [CMakeLists.txt](CMakeLists.txt) if set a different path name to User System Variable , replace the same with that.
+> **Note:** Also update the (`GLFW_INCLUDE_DIR` and `GLFW_LIBRARY`)'s locations in the [CMakeLists.txt](CMakeLists.txt) at line no 18 and 19 , can also update the "VULKAN_SDK" from all occurences in [CMakeLists.txt](CMakeLists.txt) only if set a different path name to User System Variable , replace the same with that.
 
 ---
 
