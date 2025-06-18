@@ -12,6 +12,7 @@ Makefile
 *.pdb
 *.ilk
 *.log
+.vs/
 
 # Compiled shader binaries
 shaders/*.spv
