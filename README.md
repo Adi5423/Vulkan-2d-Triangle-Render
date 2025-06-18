@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/yourusername/yourrepo/main/assets/vulkan_logo.png" alt="Vulkan Triangle" width="120"/>
+  <img src="https://raw.githubusercontent.com/adi5423/Vulkan-2d-Triangle-Render/main/assets/vulkan_logo.png" alt="Vulkan Triangle" width="120"/>
 </p>
 
 <h1 align="center">Vulkan Triangle (GLFW)</h1>
@@ -39,7 +39,7 @@ A minimal, modern C++17 project that renders a triangle using Vulkan and GLFW. N
 | GLFW             | Prebuilt static lib/headers    |
 
 > **Note:** Set the `VULKAN_SDK` environment variable (e.g. `D:/Vulkan/SDK/Installation`).
-
+> **Note:** Also update the (`GLFW_INCLUDE_DIR` and `GLFW_LIBRARY`)'s locations in the [CMakeLists.txt](CMakeLists.txt)   
 ---
 
 ## 🗂️ Project Structure
@@ -100,4 +100,20 @@ A minimal, modern C++17 project that renders a triangle using Vulkan and GLFW. N
 
 ## 🙏 Credits
 - Based on the Khronos Vulkan Tutorial and adapted for pure GLFW usage.
-- See [`Detailed_Guide.md`](./Detailed_Guide.md) for a full technical breakdown and project history. 
+- See [`Detailed_Guide.md`](./Detailed_Guide.md) for a full technical breakdown and project history.
+
+---
+
+## 📜 License
+
+Licensed under the **MIT License**. See [`LICENSE.txt`](LICENSE.txt).
+
+---
+
+## 📬 Contact if encountered any issues.
+
+* ✉️  [adii54ti23@gmail.com](mailto:adii54ti23@gmail.com)
+* 💼 [LinkedIn](https://www.linkedin.com/in/aditya-tiwari-141731329/)
+* 📸 [Instagram @adii5423\_](https://www.instagram.com/adii5423_)
+
+Made with ❤️ by Adii
