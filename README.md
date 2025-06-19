@@ -1,6 +1,3 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/adi5423/Vulkan-2d-Triangle-Render/main/assets/vulkan_logo.png" alt="Vulkan Triangle" width="120"/>
-</p>
 
 <h1 align="center">Vulkan Triangle (GLFW)</h1>
 
