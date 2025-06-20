@@ -1,105 +1,142 @@
+![Platform](https://img.shields.io/badge/Platform-Windows%2010%2B-blue?logo=windows)
+![Language](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)
+![Build](https://img.shields.io/badge/CMake-3.21%2B-blue?logo=cmake)
+![Graphics](https://img.shields.io/badge/OpenGL-4.6-green?logo=opengl)
+![License](https://img.shields.io/badge/License-MIT-yellow?logo=license)
 
-<h1 align="center">Vulkan Triangle (GLFW)</h1>
+<h1 align="center">✨ Groove Game Engine</h1>
 
 <p align="center">
-  <b>Minimal Vulkan + GLFW Triangle Demo</b><br/>
-  <a href="#minimum-requirements"><img src="https://img.shields.io/badge/Platform-Windows%2010%2B-blue?logo=windows"/></a>
-  <a href="#minimum-requirements"><img src="https://img.shields.io/badge/Vulkan-1.2%2B-red?logo=vulkan"/></a>
-  <a href="#minimum-requirements"><img src="https://img.shields.io/badge/CMake-3.15%2B-blue?logo=cmake"/></a>
-  <a href="#minimum-requirements"><img src="https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B"/></a>
+  <b>A next-gen modular C++ game engine</b><br/>
+  Built with OpenGL, GLFW, ImGui, and CMake.<br/>
+  <i>Realistic simulation • Extensible core • Modern code</i>
 </p>
 
 ---
 
-## 🚀 Overview
-A minimal, modern C++17 project that renders a triangle using Vulkan and GLFW. No Qt, no bloat—just pure Vulkan API, cross-platform windowing, and custom shaders.
-
----
-
-## ✨ Features
-- ⚡ **Minimal, modern C++17 codebase**
-- 🖼️ **Pure Vulkan API** (no Qt)
-- 🪟 **GLFW windowing**
-- 🎨 **Custom GLSL shaders → SPIR-V**
-- 🛠️ **CMake-based build system**
-
----
-
-## 📋 Minimum Requirements
-
-| Requirement      | Version/Details                |
-|------------------|-------------------------------|
-| OS               | Windows 10+ (Linux possible)  |
-| Vulkan SDK       | 1.2+ ([Download](https://vulkan.lunarg.com/sdk/home)) |
-| CMake            | 3.15+                         |
-| C++ Compiler     | C++17 (MinGW-w64, MSVC, GCC/Clang) |
-| GLFW             | Prebuilt static lib/headers    |
-
-> **Note:** Set the `VULKAN_SDK` environment variable (e.g. `D:/Vulkan/SDK/Installation`).
-
-> **Note:** Also update the (`GLFW_INCLUDE_DIR` and `GLFW_LIBRARY`)'s locations in the [CMakeLists.txt](CMakeLists.txt) at line no 18 and 19 , can also update the "VULKAN_SDK" from all occurences in [CMakeLists.txt](CMakeLists.txt) only if set a different path name to User System Variable , replace the same with that.
+<div align="center">
+  <img src="resources/proof1.png" width="400" alt="Groove Engine Screenshot" />
+  <br>
+  <strong>🚦 If you see a spinning 3D cube, you're ready to groove!</strong>
+</div>
 
 ---
 
 ## 🗂️ Project Structure
+
 ```text
-.
-├── main.cpp                # Main application source
-├── CMakeLists.txt          # Build configuration
-├── shaders/
-│   ├── triangle.vert       # Vertex shader (GLSL)
-│   ├── triangle.frag       # Fragment shader (GLSL)
-│   ├── triangle.vert.spv   # Compiled vertex shader (SPIR-V, generated)
-│   ├── triangle.frag.spv   # Compiled fragment shader (SPIR-V, generated)
-│   └── compileShaders.bat  # Batch file to compile GLSL to SPIR-V
-├── guide.txt               # Quick build/run instructions
-├── Detailed_Guide.md       # In-depth technical guide (see this for full details)
+Groove/
+├─ engine/         # Core engine modules
+│  ├─ Input/       # Input abstraction
+│  ├─ Renderer/    # OpenGL, ImGui, shaders
+│  ├─ Utils/       # Logger, helpers
+│  └─ src/         # Engine, Window, Camera, TimeStep
+├─ sandbox/        # Demo app (entry point)
+├─ resources/      # Screenshots, shaders, textures
+├─ out/            # CMake build output
+├─ LICENSE.txt     # MIT License
+├─ README.md       # This file
+├─ Detailed_Guide.md # Deep-dive technical guide
+└─ .gitignore
 ```
 
 ---
 
-## 🛠️ Setup & Build Instructions
+## 🚀 Features
 
-1. **Compile Shaders:**
-   ```sh
-   .\shaders\compileShaders.bat
-   ```
-2. **Configure the Build:**
-   ```sh
-   mkdir build && cd build
-   cmake .. -G "MinGW Makefiles"
-   ```
-3. **Copy SPIR-V Shaders:**
-   ```sh
-   copy ..\shaders\*.spv shaders
-   ```
-   (CMake may do this automatically; see `CMakeLists.txt`)
-4. **Re-run CMake (if needed):**
-   ```sh
-   cmake .. -G "MinGW Makefiles"
-   ```
-5. **Build the Project:**
-   ```sh
-   mingw32-make
-   ```
-6. **Run the Application:**
-   ```sh
-   .\VulkN_Triangle.exe
-   ```
+| Subsystem        | Status | Highlights                                 |
+| ---------------- | :----: | ------------------------------------------ |
+| 🛠️ Build System |    ✅   | CMake-based, modular targets               |
+| 🪟 Windowing     |    ✅   | GLFW, resizable, VSync toggle              |
+| 🎮 Input         |    ✅   | Keyboard/mouse support with edge detection |
+| 📜 Logging       |    ✅   | Color console, file logs                   |
+| 🖼️ Rendering    |    ✅   | OpenGL, VAO/VBO/IBO, shaders, 3D cube      |
+| 🧰 UI (ImGui)    |    ✅   | Overlay, debug panels                      |
+| ⏱️ Delta Time    |    ✅   | Smooth animations with TimeStep            |
+| 🧠 Next Features |   🔲   | ECS, events, scene, vehicles, roads        |
 
 ---
 
-## 🧩 Troubleshooting
-- ❗ **VULKAN_SDK not defined:** Set the environment variable to your Vulkan SDK path.
-- ❗ **GLFW not found:** Update the GLFW include/library paths in `CMakeLists.txt`.
-- ❗ **SPIR-V files missing:** Compile shaders and copy `.spv` files to the build directory before running.
-- ❗ **Other build errors:** Ensure your compiler supports C++17 and all dependencies are installed.
+## 📦 Requirements
+
+* **C++17** or newer
+* **Visual Studio 2022** (Desktop C++)
+* **CMake 3.21+**
+* **vcpkg** (for dependencies)
+
+```bash
+vcpkg install glfw3 glad glm imgui[glfw-binding,opengl3-binding]
+```
 
 ---
 
-## 🙏 Credits
-- Based on the Khronos Vulkan Tutorial and adapted for pure GLFW usage.
-- See [`Detailed_Guide.md`](./Detailed_Guide.md) for a full technical breakdown and project history.
+## ⚡ Quick Start
+
+### 1. Clone the Repo
+
+```bash
+git clone https://github.com/Adi5423/Groove-Game-Engine.git
+cd Groove-Game-Engine
+```
+
+### 2. Configure with CMake
+
+```bash
+cmake -S . -B out/build/windows-debug -G "Visual Studio 17 2022" -A x64 ^
+  -DCMAKE_TOOLCHAIN_FILE="<VCPKG_PATH>/scripts/buildsystems/vcpkg.cmake"
+```
+
+### 3. Build the Engine
+
+```bash
+cmake --build out/build/windows-debug --config Debug
+```
+
+### 4. Run the Demo
+
+```bash
+./out/build/windows-debug/sandbox/Sandbox.exe
+```
+
+---
+
+## 🧩 Visual Studio Workflow
+
+* Open root folder in **Visual Studio 2022**
+* Save any `CMakeLists.txt` to auto-trigger reconfigure
+* Build with `Ctrl+Shift+B` or **Build > Rebuild All**
+* Run `Sandbox.exe` from the output folder
+
+---
+
+## 🎮 Controls
+
+| Action        | Key / Input      |
+| ------------- | ---------------- |
+| Move Forward  | `W`              |
+| Move Backward | `S`              |
+| Move Left     | `A`              |
+| Move Right    | `D`              |
+| Move Up       | `Space`          |
+| Move Down     | `Ctrl`           |
+| Look Around   | `Mouse Movement` |
+| Toggle Cursor | `ESC`            |
+
+---
+
+## 🖼️ Screenshots
+
+| Output     | Preview                         |
+| ---------- | ------------------------------- |
+| proof1.png | ![proof1](resources/proof1.png) |
+| proof2.png | ![proof2](resources/proof2.png) |
+
+---
+
+## 🗺️ Roadmap
+
+* [x] Logging, Input, Window, Shaders, ImGui, 3D Cube
+* [ ] ECS, Events, Scene System, Vehicles, Roads
 
 ---
 
@@ -109,10 +146,10 @@ Licensed under the **MIT License**. See [`LICENSE.txt`](LICENSE.txt).
 
 ---
 
-## 📬 Contact if encountered any issues.
+## 📬 Contact
 
-* ✉️  [adii54ti23@gmail.com](mailto:adii54ti23@gmail.com)
+* ✉️ [adii54ti23@gmail.com](mailto:adii54ti23@gmail.com)
 * 💼 [LinkedIn](https://www.linkedin.com/in/aditya-tiwari-141731329/)
 * 📸 [Instagram @adii5423\_](https://www.instagram.com/adii5423_)
 
-Made with ❤️ by Adii
+<p align="center"><i>Made with ❤️ by Adii</i></p>
